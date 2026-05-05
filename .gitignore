@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+.env
+.claude/redash/cache/
+.claude/redash/recents.json

@@ -1,0 +1,21 @@
+{
+  "name": "redash",
+  "owner": {
+    "name": "Marco Galicia",
+    "email": "marcoogalicia@icloud.com"
+  },
+  "plugins": [
+    {
+      "name": "redash",
+      "description": "Query and execute Redash queries, dashboards, and data sources via the REST API. Reads credentials from REDASH_* env vars.",
+      "version": "0.4.0",
+      "author": {
+        "name": "Marco Galicia"
+      },
+      "source": {
+        "source": "github",
+        "repo": "cartografos/redash"
+      }
+    }
+  ]
+}

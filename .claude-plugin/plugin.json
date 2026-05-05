@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "redash",
+  "version": "0.4.0",
+  "description": "Query and execute Redash queries, dashboards, and data sources via the REST API. Reads credentials from REDASH_* env vars.",
+  "author": {
+    "name": "Marco Galicia",
+    "email": "marcoogalicia@icloud.com"
+  },
+  "keywords": ["redash", "sql", "analytics", "dashboards", "cartografo"]
+}

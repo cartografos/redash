@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Wrapper for the Redash REST API. Uses REDASH_* env vars.
+#
+# Usage:
+#   redash-api GET /api/queries                       # list queries
+#   redash-api GET /api/queries/123                   # query detail
+#   redash-api POST /api/queries/123/results          # execute query (returns job or cached result)
+#   redash-api POST /api/query_results -d @body.json  # ad-hoc query
+#   echo '{"query":"select 1","data_source_id":1}' | redash-api POST /api/query_results -d @-
+#
+# Output: the response body as returned by Redash (JSON).
+# Pipe to `jq` for pretty-printing.
+set -euo pipefail
+
+: "${REDASH_URL:?Missing env var REDASH_URL (e.g. https://redash.example.com)}"
+: "${REDASH_API_KEY:?Missing env var REDASH_API_KEY (User API Key — Settings → Account)}"
+
+# Normalize URL: strip trailing slash.
+REDASH_URL="${REDASH_URL%/}"
+
+if (( $# < 2 )); then
+  echo "ERROR: usage: redash-api <METHOD> <PATH> [curl-args...]" >&2
+  echo "  e.g.: redash-api GET /api/queries" >&2
+  echo "        redash-api POST /api/queries/123/results" >&2
+  exit 64
+fi
+
+METHOD="$1"; shift
+API_PATH="$1"; shift
+
+# Normalize path: ensure single leading slash.
+if [[ "$API_PATH" != /* ]]; then
+  API_PATH="/${API_PATH}"
+fi
+
+URL="${REDASH_URL}${API_PATH}"
+TIMEOUT="${REDASH_TIMEOUT:-60}"
+
+curl --silent --show-error --fail-with-body \
+  --max-time "$TIMEOUT" \
+  --request "$METHOD" \
+  --header "Authorization: Key ${REDASH_API_KEY}" \
+  --header "Content-Type: application/json" \
+  --header "Accept: application/json" \
+  "$@" \
+  "$URL"

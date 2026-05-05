@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# redash-resolve-ds: data source resolver for the Redash plugin.
+#
+# Subcommands:
+#   resolve <text|id>   Resolve a single data source id from a numeric id or a
+#                       multi-token substring search (case-insensitive AND).
+#                         exit 0 → unique match; stdout: <id>
+#                         exit 1 → no match;     stderr: JSON {error, query, suggestions[]}
+#                         exit 2 → ambiguous;    stderr: JSON {error, query, count, candidates[]}
+#   recents [N]         Print up to N (default 5) most recently used data sources as JSON.
+#   remember <id>       Record <id> as recently used (writes recents.json).
+#   refresh             Force-refresh the catalog cache from the API.
+#   state-dir           Print the resolved state directory.
+#
+# State (project-local by default):
+#   ${REDASH_STATE_DIR:-$PWD/.claude/redash}/cache/data_sources.json   (TTL 1h)
+#   ${REDASH_STATE_DIR:-$PWD/.claude/redash}/recents.json              (max 10 items)
+set -euo pipefail
+
+CACHE_TTL_SECONDS="${REDASH_DS_CACHE_TTL:-3600}"
+RECENTS_MAX=10
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REDASH_API="$HERE/redash-api"
+
+STATE_DIR="${REDASH_STATE_DIR:-$PWD/.claude/redash}"
+CACHE_DIR="$STATE_DIR/cache"
+CACHE_FILE="$CACHE_DIR/data_sources.json"
+RECENTS_FILE="$STATE_DIR/recents.json"
+
+ensure_dirs() { mkdir -p "$CACHE_DIR"; }
+
+ensure_recents() {
+  ensure_dirs
+  [[ -f "$RECENTS_FILE" ]] || printf '[]\n' > "$RECENTS_FILE"
+}
+
+cache_age_seconds() {
+  if [[ ! -f "$CACHE_FILE" ]]; then echo 999999; return; fi
+  local mtime
+  if mtime=$(stat -f %m "$CACHE_FILE" 2>/dev/null); then :
+  else mtime=$(stat -c %Y "$CACHE_FILE"); fi
+  echo $(( $(date +%s) - mtime ))
+}
+
+ensure_cache() {
+  ensure_dirs
+  local age; age=$(cache_age_seconds)
+  if (( age > CACHE_TTL_SECONDS )); then
+    "$REDASH_API" GET /api/data_sources > "$CACHE_FILE.tmp"
+    mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+  fi
+}
+
+cmd_resolve() {
+  local input="${1:-}"
+  if [[ -z "$input" ]]; then
+    printf '{"error":"empty_input"}\n' >&2
+    exit 64
+  fi
+  ensure_cache
+
+  # Numeric id path.
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    local found
+    found=$(jq --argjson id "$input" \
+      '[.[] | select(.id == $id) | {id, name, type}] | .[0] // null' "$CACHE_FILE")
+    if [[ "$found" == "null" ]]; then
+      jq -n --argjson id "$input" '{error:"id_not_found", id:$id}' >&2
+      exit 1
+    fi
+    jq -r '.id' <<<"$found"
+    exit 0
+  fi
+
+  # Multi-token AND substring match (case-insensitive).
+  local matches
+  matches=$(jq --arg q "$input" '
+    ($q | ascii_downcase | split(" ") | map(select(. != ""))) as $toks
+    | [
+        .[]
+        | (.name | ascii_downcase) as $n
+        | select(all($toks[]; . as $t | $n | contains($t)))
+        | {id, name, type}
+      ]
+    | sort_by(.name)
+  ' "$CACHE_FILE")
+
+  local count; count=$(jq 'length' <<<"$matches")
+  if [[ "$count" == "1" ]]; then
+    jq -r '.[0].id' <<<"$matches"
+    exit 0
+  fi
+
+  if [[ "$count" == "0" ]]; then
+    # Soft fallback: any token matches; first 10 results.
+    local soft
+    soft=$(jq --arg q "$input" '
+      ($q | ascii_downcase | split(" ") | map(select(. != ""))) as $toks
+      | [
+          .[]
+          | (.name | ascii_downcase) as $n
+          | select(any($toks[]; . as $t | $n | contains($t)))
+          | {id, name, type}
+        ]
+      | sort_by(.name) | .[:10]
+    ' "$CACHE_FILE")
+    jq -n --arg q "$input" --argjson s "$soft" \
+      '{error:"no_match", query:$q, suggestions:$s}' >&2
+    exit 1
+  fi
+
+  jq -n --arg q "$input" --argjson c "$matches" \
+    '{error:"ambiguous", query:$q, count:($c|length), candidates:$c}' >&2
+  exit 2
+}
+
+cmd_recents() {
+  ensure_recents
+  local n="${1:-5}"
+  jq --argjson n "$n" '.[:$n]' "$RECENTS_FILE"
+}
+
+cmd_remember() {
+  local id="${1:-}"
+  if [[ ! "$id" =~ ^[0-9]+$ ]]; then
+    printf '{"error":"need_numeric_id"}\n' >&2
+    exit 64
+  fi
+  ensure_cache
+  ensure_recents
+  local entry
+  entry=$(jq --argjson id "$id" \
+    '[.[] | select(.id == $id) | {id, name, type}] | .[0] // null' "$CACHE_FILE")
+  if [[ "$entry" == "null" ]]; then
+    jq -n --argjson id "$id" '{error:"id_not_in_catalog", id:$id}' >&2
+    exit 1
+  fi
+  local now; now=$(date -u +%FT%TZ)
+  jq --argjson e "$entry" --arg ts "$now" --argjson max "$RECENTS_MAX" '
+    [($e + {last_used_at: $ts})] + (map(select(.id != $e.id))) | .[:$max]
+  ' "$RECENTS_FILE" > "$RECENTS_FILE.tmp"
+  mv "$RECENTS_FILE.tmp" "$RECENTS_FILE"
+  jq '.[0]' "$RECENTS_FILE"
+}
+
+cmd_refresh() {
+  ensure_dirs
+  rm -f "$CACHE_FILE"
+  "$REDASH_API" GET /api/data_sources > "$CACHE_FILE"
+  jq -n --argjson c "$(jq 'length' "$CACHE_FILE")" --arg f "$CACHE_FILE" \
+    '{cached:$c, file:$f}'
+}
+
+cmd_state_dir() { printf '%s\n' "$STATE_DIR"; }
+
+case "${1:-}" in
+  resolve)   shift; cmd_resolve "$@" ;;
+  recents)   shift; cmd_recents "$@" ;;
+  remember)  shift; cmd_remember "$@" ;;
+  refresh)   cmd_refresh ;;
+  state-dir) cmd_state_dir ;;
+  *) echo "usage: redash-resolve-ds {resolve|recents|remember|refresh|state-dir}" >&2; exit 64 ;;
+esac
